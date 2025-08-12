@@ -11,8 +11,8 @@ import base64
 
 app = FastAPI()
 
-OPENROUTER_API_KEY = "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"  # your API key here
-BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_API_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImRpdnlhZGFyc2hpbmlhYmlAZ21haWwuY29tIn0.2Q_tZIXG62WM5jN4WUcaD2szCv7o9cwDxiK2JrEbu6Y"  # your API key here
+BASE_URL = "https://aipipe.org/openrouter/v1"
 MODEL = "openai/gpt-3.5-turbo"
 
 async def summarize_attachments(files: List[UploadFile]) -> str:
