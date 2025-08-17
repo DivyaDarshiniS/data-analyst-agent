@@ -9,8 +9,12 @@ import re
 import matplotlib.pyplot as plt
 import base64
 import numpy as np
+from fastapi.middleware.cors import CORSMiddleware
+import re
 
 app = FastAPI()
+
+
 # Allow CORS from any origin (for dev; restrict in production)
 app.add_middleware(
     CORSMiddleware,
@@ -54,6 +58,7 @@ async def summarize_attachments(files: List[UploadFile]) -> str:
             summaries.append(f"File '{filename}' not previewed.")
     return "\n".join(summaries)
 
+
 def parse_questions_file(file_content: str):
     """
     Extract dataset description, wiki URLs, and questions block dynamically.
@@ -87,21 +92,23 @@ def parse_questions_file(file_content: str):
         "questions": questions_text
     }
 
-def clean_llm_json(raw: str) -> str:
+
+def clean_llm_json(raw: str, max_base64_length=100000) -> str:
+    # remove markdown json fences
     raw = re.sub(r"^```(?:json)?\n", "", raw.strip(), flags=re.MULTILINE)
     raw = raw.replace("```", "").strip()
-    # Remove whitespace/newlines inside base64
+    
+    # clean base64
     base64_pattern = r'(data:image\/[a-zA-Z]+;base64,)([A-Za-z0-9+/=\n\r\s]+)'
     def clean_base64(m):
         prefix, data = m.groups()
-        return prefix + re.sub(r'\s+', '', data)
+        clean_data = re.sub(r'\s+', '', data)
+        if len(clean_data) > max_base64_length:
+            clean_data = clean_data[:max_base64_length]  # truncate to avoid parsing issues
+        return prefix + clean_data
     raw = re.sub(base64_pattern, clean_base64, raw)
     return raw
 
-def clean_base64_string(b64: str) -> str:
-    """Ensure base64 is clean and wrapped as a data URI."""
-    clean_b64 = re.sub(r'\s+', '', b64)
-    return f"data:image/png;base64,{clean_b64}"
 
 def call_openrouter_llm(prompt: str) -> str:
     headers = {
@@ -115,7 +122,7 @@ def call_openrouter_llm(prompt: str) -> str:
                 "role": "system",
                 "content": (
                     "You are a data analyst agent. Return ONLY valid JSON in the exact format requested. "
-                    "Do NOT include any images or base64 data. Only data and stats."
+                    "Do NOT include any explanations outside JSON."
                 )
             },
             {"role": "user", "content": prompt}
@@ -128,11 +135,16 @@ def call_openrouter_llm(prompt: str) -> str:
         raise Exception(f"OpenRouter API Error: {response.status_code} - {response.text}")
     return response.json()["choices"][0]["message"]["content"]
 
+
 def generate_chart_base64(x, y, xlabel="X", ylabel="Y", title="Chart"):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import io
+    import base64
+
     plt.figure(figsize=(5,4))
     plt.scatter(x, y, color='skyblue')
     if len(x) > 1:
-        # regression line
         m, b = np.polyfit(x, y, 1)
         plt.plot(x, [m*xi+b for xi in x], 'r--')
     plt.xlabel(xlabel)
@@ -147,6 +159,11 @@ def generate_chart_base64(x, y, xlabel="X", ylabel="Y", title="Chart"):
     img_bytes = buf.read()
     b64 = base64.b64encode(img_bytes).decode('utf-8')
     return clean_base64_string(b64)
+
+def clean_base64_string(b64: str) -> str:
+    """Remove all whitespace/newlines from base64 and return proper data URI."""
+    clean_b64 = re.sub(r'\s+', '', b64)
+    return f"data:image/png;base64,{clean_b64}"
 
 # ==== FastAPI endpoint ====
 @app.post("/api/")
@@ -175,15 +192,19 @@ IMPORTANT:
 """
         raw_result = call_openrouter_llm(prompt)
         cleaned_result = clean_llm_json(raw_result)
-        parsed_result = json.loads(cleaned_result)
+        try:
+            parsed_result = json.loads(cleaned_result)
+        except json.JSONDecodeError:
+            # fallback for debugging
+            return JSONResponse(content={"error": "JSON parsing failed", "raw": cleaned_result}, status_code=500)
 
-        # Generate charts if numeric data exists
+        # Optionally generate a chart if numeric data present
         if "total_sales" in parsed_result:
             parsed_result["bar_chart"] = generate_chart_base64(
                 x=["Total Sales"], y=[parsed_result["total_sales"]],
                 xlabel="Metric", ylabel="Value", title="Total Sales"
             )
-
+        
         return JSONResponse(content=parsed_result)
 
     except Exception as e:
