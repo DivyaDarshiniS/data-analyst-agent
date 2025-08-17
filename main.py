@@ -109,6 +109,25 @@ def generate_chart_base64(x, y, xlabel="X", ylabel="Y", title="Chart"):
     buf = io.BytesIO(); plt.savefig(buf, format='png'); plt.close(); buf.seek(0)
     return f"data:image/png;base64,{base64.b64encode(buf.read()).decode('utf-8')}"
 
+def normalize_base64_images(parsed_result):
+    """
+    Ensure all base64 chart outputs are valid data URIs.
+    Works for both dict and list JSON responses.
+    """
+    prefix = "data:image/png;base64,"
+    if isinstance(parsed_result, dict):
+        for k, v in parsed_result.items():
+            if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9+/=\n\r]+", v):
+                # looks like bare base64 → add prefix
+                parsed_result[k] = prefix + v.replace("\n", "").replace("\r", "")
+    elif isinstance(parsed_result, list):
+        parsed_result = [
+            prefix + v.replace("\n", "").replace("\r", "") if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9+/=\n\r]+", v) else v
+            for v in parsed_result
+        ]
+    return parsed_result
+
+
 # ==== FastAPI endpoint ====
 @app.post("/api/")
 async def analyze(questions: UploadFile = File(...), files: Optional[List[UploadFile]] = File(None)):
@@ -153,6 +172,7 @@ IMPORTANT:
                     xlabel="Metric", ylabel="Value", title="Total Sales"
                 )
 
+        parsed_result = normalize_base64_images(parsed_result)
         return JSONResponse(content=parsed_result)
 
     except Exception as e:
