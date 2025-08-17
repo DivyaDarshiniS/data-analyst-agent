@@ -111,21 +111,39 @@ def generate_chart_base64(x, y, xlabel="X", ylabel="Y", title="Chart"):
 
 def normalize_base64_images(parsed_result):
     """
-    Ensure all base64 chart outputs are valid data URIs.
-    Works for both dict and list JSON responses.
+    Ensure all base64 outputs are valid data URIs.
+    If a value looks like base64, validate & fix it.
     """
     prefix = "data:image/png;base64,"
+
+    def fix_base64_string(val: str) -> str:
+        # Remove whitespace/newlines
+        cleaned = re.sub(r"\s+", "", val)
+
+        # If already has prefix, strip and keep only base64 part
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):]
+
+        # Validate by trying to decode/encode again
+        try:
+            decoded = base64.b64decode(cleaned, validate=True)
+            reencoded = base64.b64encode(decoded).decode("utf-8")
+            return prefix + reencoded
+        except Exception:
+            # Not valid base64, just return as-is
+            return val
+
     if isinstance(parsed_result, dict):
         for k, v in parsed_result.items():
-            if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9+/=\n\r]+", v):
-                # looks like bare base64 → add prefix
-                parsed_result[k] = prefix + v.replace("\n", "").replace("\r", "")
+            if isinstance(v, str) and ("iVBOR" in v or "base64" in v):
+                parsed_result[k] = fix_base64_string(v)
     elif isinstance(parsed_result, list):
         parsed_result = [
-            prefix + v.replace("\n", "").replace("\r", "") if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9+/=\n\r]+", v) else v
+            fix_base64_string(v) if isinstance(v, str) and ("iVBOR" in v or "base64" in v) else v
             for v in parsed_result
         ]
     return parsed_result
+
 
 
 # ==== FastAPI endpoint ====
