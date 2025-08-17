@@ -147,33 +147,52 @@ def normalize_base64_images(parsed_result):
 
 
 # ==== FastAPI endpoint ====
-from fastapi import FastAPI, File, UploadFile, Form, Body
-from fastapi.responses import JSONResponse
-from typing import List, Optional, Union
-import json
-
 @app.post("/api/")
-async def analyze(
-    questions: Optional[UploadFile] = File(None),
-    files: Optional[List[UploadFile]] = File(None),
-    questions_text: Optional[str] = Body(None)  # allow JSON/raw text instead of file
-):
+async def analyze(questions: UploadFile = File(...), files: Optional[List[UploadFile]] = File(None)):
     try:
-        if questions is not None:
-            # read from uploaded file
-            questions_text = (await questions.read()).decode("utf-8")
-        elif questions_text is not None:
-            # already sent in JSON body
-            if isinstance(questions_text, dict):
-                # if JSON object, turn into pretty string
-                questions_text = json.dumps(questions_text, indent=2)
-        else:
-            return JSONResponse(
-                {"error": "No questions provided (need file or JSON body)"},
-                status_code=400
-            )
+        questions_text = (await questions.read()).decode("utf-8")
+        context_files = await summarize_attachments(files) if files else "No additional files provided."
+        
+        parsed = parse_questions_file(questions_text)
+        prompt = f"""
+Dataset Description:
+{parsed['dataset_description']}
 
-        # ... (rest of your pipeline: parse_questions_file, call LLM, etc.)
+Reference Links:
+{', '.join(parsed['wiki_urls'])}
+
+Attached Files Context:
+{context_files}
+
+Questions:
+{parsed['questions']}
+
+IMPORTANT:
+- Output must be valid JSON (either object or array).
+- If array, keep it as array of strings.
+- If object, include numeric values + base64 charts if asked.
+"""
+        raw_result = call_openrouter_llm(prompt)
+        cleaned_result = clean_llm_json(raw_result)
+
+        # Handle JSON object or array
+        parsed_result: Union[dict, list]
+        try:
+            parsed_result = json.loads(cleaned_result)
+        except Exception:
+            return JSONResponse(content={"error": "JSON parsing failed", "raw": cleaned_result}, status_code=500)
+
+        # Only inject charts if dict (not array)
+        if isinstance(parsed_result, dict):
+            if "total_sales" in parsed_result:
+                parsed_result["bar_chart"] = generate_chart_base64(
+                    x=["Total Sales"], y=[parsed_result["total_sales"]],
+                    xlabel="Metric", ylabel="Value", title="Total Sales"
+                )
+
+        parsed_result = normalize_base64_images(parsed_result)
+        return JSONResponse(content=parsed_result)
 
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        error_output = locals().get("raw_result", "")
+        return JSONResponse(content={"error": str(e), "raw": error_output}, status_code=500)
