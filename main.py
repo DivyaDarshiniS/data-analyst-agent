@@ -1,20 +1,17 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
-from typing import List, Optional
+from typing import List, Optional, Union
 import pandas as pd
 import io
 import requests
 import json
 import re
 import matplotlib.pyplot as plt
-import base64
 import numpy as np
+import base64
 from fastapi.middleware.cors import CORSMiddleware
-import re
 
 app = FastAPI()
-
-
 # Allow CORS from any origin (for dev; restrict in production)
 app.add_middleware(
     CORSMiddleware,
@@ -25,7 +22,7 @@ app.add_middleware(
 )
 
 # ==== LLM / OpenRouter config ====
-OPENROUTER_API_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImRpdnlhZGFyc2hpbmlhYmlAZ21haWwuY29tIn0.2Q_tZIXG62WM5jN4WUcaD2szCv7o9cwDxiK2JrEbu6Y"  # replace with your AIPipe key
+OPENROUTER_API_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImRpdnlhZGFyc2hpbmlhYmlAZ21haWwuY29tIn0.2Q_tZIXG62WM5jN4WUcaD2szCv7o9cwDxiK2JrEbu6Y"   # replace with your API key
 BASE_URL = "https://aipipe.org/openrouter/v1"
 MODEL = "openai/gpt-3.5-turbo"
 
@@ -58,112 +55,59 @@ async def summarize_attachments(files: List[UploadFile]) -> str:
             summaries.append(f"File '{filename}' not previewed.")
     return "\n".join(summaries)
 
-
 def parse_questions_file(file_content: str):
-    """
-    Extract dataset description, wiki URLs, and questions block dynamically.
-    """
     lines = file_content.strip().splitlines()
-    
-    dataset_desc = []
-    wiki_urls = []
-    questions_block = []
+    dataset_desc, wiki_urls, questions_block = [], [], []
     inside_json = False
-    
+
     for line in lines:
-        # capture URLs
         if "http" in line:
             urls = re.findall(r'(https?://\S+)', line)
             wiki_urls.extend(urls)
-        # detect JSON block start
-        if line.strip().startswith("{"):
+        if line.strip().startswith("{") or line.strip().startswith("["):
             inside_json = True
         if inside_json:
             questions_block.append(line)
         else:
             dataset_desc.append(line)
-    
+
     dataset_description = "\n".join(dataset_desc).strip()
     questions_text = "\n".join(questions_block).strip()
-    
-    return {
-        "dataset_description": dataset_description,
-        "wiki_urls": wiki_urls,
-        "questions": questions_text
-    }
+    return {"dataset_description": dataset_description, "wiki_urls": wiki_urls, "questions": questions_text}
 
-
-def clean_llm_json(raw: str, max_base64_length=100000) -> str:
-    # remove markdown json fences
+def clean_llm_json(raw: str) -> str:
     raw = re.sub(r"^```(?:json)?\n", "", raw.strip(), flags=re.MULTILINE)
     raw = raw.replace("```", "").strip()
-    
-    # clean base64
     base64_pattern = r'(data:image\/[a-zA-Z]+;base64,)([A-Za-z0-9+/=\n\r\s]+)'
-    def clean_base64(m):
-        prefix, data = m.groups()
-        clean_data = re.sub(r'\s+', '', data)
-        if len(clean_data) > max_base64_length:
-            clean_data = clean_data[:max_base64_length]  # truncate to avoid parsing issues
-        return prefix + clean_data
-    raw = re.sub(base64_pattern, clean_base64, raw)
-    return raw
-
+    def clean_base64(m): return m.group(1) + re.sub(r'\s+', '', m.group(2))
+    return re.sub(base64_pattern, clean_base64, raw)
 
 def call_openrouter_llm(prompt: str) -> str:
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a data analyst agent. Return ONLY valid JSON in the exact format requested. "
-                    "Do NOT include any explanations outside JSON."
-                )
-            },
+            {"role": "system", "content": "You are a data analyst agent. Return ONLY valid JSON."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0,
-        "max_tokens": 4096
+        "max_tokens": 2048
     }
     response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=payload)
     if response.status_code != 200:
         raise Exception(f"OpenRouter API Error: {response.status_code} - {response.text}")
     return response.json()["choices"][0]["message"]["content"]
 
-
 def generate_chart_base64(x, y, xlabel="X", ylabel="Y", title="Chart"):
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import io
-    import base64
-
     plt.figure(figsize=(5,4))
     plt.scatter(x, y, color='skyblue')
     if len(x) > 1:
         m, b = np.polyfit(x, y, 1)
-        plt.plot(x, [m*xi+b for xi in x], 'r--')
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.title(title)
+        plt.plot(x, [m*xi + b for xi in x], 'r--')
+    plt.xlabel(xlabel); plt.ylabel(ylabel); plt.title(title)
     plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    buf.seek(0)
-    img_bytes = buf.read()
-    b64 = base64.b64encode(img_bytes).decode('utf-8')
-    return clean_base64_string(b64)
-
-def clean_base64_string(b64: str) -> str:
-    """Remove all whitespace/newlines from base64 and return proper data URI."""
-    clean_b64 = re.sub(r'\s+', '', b64)
-    return f"data:image/png;base64,{clean_b64}"
+    buf = io.BytesIO(); plt.savefig(buf, format='png'); plt.close(); buf.seek(0)
+    return f"data:image/png;base64,{base64.b64encode(buf.read()).decode('utf-8')}"
 
 # ==== FastAPI endpoint ====
 @app.post("/api/")
@@ -177,7 +121,7 @@ async def analyze(questions: UploadFile = File(...), files: Optional[List[Upload
 Dataset Description:
 {parsed['dataset_description']}
 
-Wikipedia / Reference Links:
+Reference Links:
 {', '.join(parsed['wiki_urls'])}
 
 Attached Files Context:
@@ -187,26 +131,30 @@ Questions:
 {parsed['questions']}
 
 IMPORTANT:
-- Output must be valid JSON containing data and stats ONLY.
-- Include any charts as base64 if requested.
+- Output must be valid JSON (either object or array).
+- If array, keep it as array of strings.
+- If object, include numeric values + base64 charts if asked.
 """
         raw_result = call_openrouter_llm(prompt)
         cleaned_result = clean_llm_json(raw_result)
+
+        # Handle JSON object or array
+        parsed_result: Union[dict, list]
         try:
             parsed_result = json.loads(cleaned_result)
-        except json.JSONDecodeError:
-            # fallback for debugging
+        except Exception:
             return JSONResponse(content={"error": "JSON parsing failed", "raw": cleaned_result}, status_code=500)
 
-        # Optionally generate a chart if numeric data present
-        if "total_sales" in parsed_result:
-            parsed_result["bar_chart"] = generate_chart_base64(
-                x=["Total Sales"], y=[parsed_result["total_sales"]],
-                xlabel="Metric", ylabel="Value", title="Total Sales"
-            )
-        
+        # Only inject charts if dict (not array)
+        if isinstance(parsed_result, dict):
+            if "total_sales" in parsed_result:
+                parsed_result["bar_chart"] = generate_chart_base64(
+                    x=["Total Sales"], y=[parsed_result["total_sales"]],
+                    xlabel="Metric", ylabel="Value", title="Total Sales"
+                )
+
         return JSONResponse(content=parsed_result)
 
     except Exception as e:
         error_output = locals().get("raw_result", "")
-        return JSONResponse(content={"error": str(e), "output": error_output}, status_code=500)
+        return JSONResponse(content={"error": str(e), "raw": error_output}, status_code=500)
